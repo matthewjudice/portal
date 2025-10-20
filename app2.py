@@ -81,7 +81,6 @@ def get_customer(customer_id):
         return api_error("Customer not found", 404)
     return jsonify(customers[customer_id])
 
-# --- NEW ENDPOINT: LINK TOKEN TO CUSTOMER ---
 @app.route('/api/customers/<customer_id>/token', methods=['POST'])
 def save_customer_token(customer_id):
     """Links an existing tokenId (obtained via POST /api/epay/tokens) to a local customer."""
@@ -101,7 +100,6 @@ def save_customer_token(customer_id):
         'message': 'Token successfully linked to customer.',
         'customer': customers[customer_id]
     })
-# --- END NEW ENDPOINT ---
 
 
 @app.route('/api/invoices', methods=['GET'])
@@ -154,22 +152,22 @@ def mark_invoice_paid(invoice_id):
 # === EPAY API ENDPOINTS (REAL CALL IMPLEMENTATION) =======
 # =========================================================
 
-# --- 1. POST /epay/tokens (REAL TOKEN CREATION - FLATTENED PAYLOAD) ---
+# --- 1. POST /epay/tokens (REAL TOKEN CREATION - STRICT PAYLOAD MATCH) ---
 @app.route('/api/epay/tokens', methods=['POST'])
 def create_token():
     data = request.get_json()
     
-    # 1. Input Validation & Data Sanitization
+    # 1. Input Validation & Data Sanitization (STRICTLY MATCHING THE PROVIDED PAYLOAD)
     is_cc = 'creditCardInformation' in data
-    is_ach = 'bankAccountInformation' in data
-    
-    # Check for required customer-related fields expected by the external API
-    if not all(k in data for k in ('emailAddress', 'payerName')):
-        return api_error("Missing required customer fields: 'emailAddress' or 'payerName'.", 400)
+    is_ach = 'bankAccountInformation' in data # Assuming this may also be present
+
+    # Flask-side validation to ensure required top-level fields are present
+    if not all(k in data for k in ('payer', 'emailAddress')):
+        return api_error("Missing required customer fields: 'payer' or 'emailAddress'.", 400)
 
     external_data = data.copy()
 
-    # Clean up the payload based on payment type
+    # Clean up the payload based on payment type (if both are sent, default to CC)
     if is_cc and is_ach:
         del external_data['bankAccountInformation'] 
     elif is_ach:
@@ -193,7 +191,7 @@ def create_token():
         real_response = requests.post(
             f"{EPAY_BASE_URL}/tokens", 
             headers=headers, 
-            json=external_data, # Use the flattened data here
+            json=external_data, # Use the validated/cleaned data here
             auth=auth,
             timeout=30,
             verify=False 
@@ -220,6 +218,7 @@ def create_token():
     except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code
         try:
+            # The actual error from the external API (ePay) will show up here
             error_message = e.response.json().get('error') or e.response.json().get('message') or e.response.text
         except:
             error_message = e.response.text
@@ -387,5 +386,4 @@ def get_transaction(transaction_id):
 
 # --- RUNNER ---
 if __name__ == '__main__':
-    # NOTE: In production (like on Render), this block is ignored; Gunicorn runs the app.
     app.run(debug=True)
