@@ -1,22 +1,44 @@
 import json
 import random
 import uuid
+import ssl
 from flask import Flask, request, jsonify, url_for, Response
 from flask_cors import CORS
-# NOTE: The 'requests' library is used to simulate calling the external ePay API.
 import requests 
 from requests.auth import HTTPBasicAuth
+from requests.adapters import HTTPAdapter # NEW IMPORT
 import urllib3
 
 # Suppress the InsecureRequestWarning from using verify=False
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
+# =========================================================
+# === CRITICAL FIX: Custom Adapter for TLS 1.2/1.3 Force ===
+# =========================================================
+
+# This adapter forces the requests library to use a modern TLS protocol, 
+# which often resolves 503/SSL issues when connecting from cloud environments.
+class TlsAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False):
+        # Force TLSv1.2 or higher
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2 
+        self.poolmanager = urllib3.poolmanager.PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            ssl_version=ctx.protocol,
+            ssl_context=ctx
+        )
+
+# =========================================================
+# =========================================================
 
 app = Flask(__name__)
 # Enable CORS for communication with the frontend
 CORS(app)
 
-# --- CONFIGURATION (UPDATED WITH REGENERATED CREDENTIALS) ---
+# --- CONFIGURATION (UPDATED CREDENTIALS) ---
 
 EPAY_API_KEY = "376f59d731aa4ea"  
 EPAY_API_SECRET = "4f4eaf61f7754dd" 
@@ -66,7 +88,6 @@ def add_customer():
         return api_error("Missing required fields: name or email", 400)
         
     customer_id = f"cust-{str(uuid.uuid4())[:8]}"
-    # Ensure a tokenId field is initialized
     new_customer = {'id': customer_id, 'tokenId': None, **data}
     customers[customer_id] = new_customer
     
@@ -83,7 +104,6 @@ def get_customer(customer_id):
 
 @app.route('/api/customers/<customer_id>/token', methods=['POST'])
 def save_customer_token(customer_id):
-    """Links an existing tokenId (obtained via POST /api/epay/tokens) to a local customer."""
     if customer_id not in customers:
         return api_error("Customer not found", 404)
         
@@ -93,7 +113,6 @@ def save_customer_token(customer_id):
     if not token_id:
         return api_error("Missing 'tokenId' in request body.", 400)
     
-    # Store the tokenId on the customer record
     customers[customer_id]['tokenId'] = token_id
     
     return jsonify({
@@ -152,22 +171,19 @@ def mark_invoice_paid(invoice_id):
 # === EPAY API ENDPOINTS (REAL CALL IMPLEMENTATION) =======
 # =========================================================
 
-# --- 1. POST /epay/tokens (REAL TOKEN CREATION - STRICT PAYLOAD MATCH) ---
+# --- 1. POST /epay/tokens (REAL TOKEN CREATION - WITH TLS FIX) ---
 @app.route('/api/epay/tokens', methods=['POST'])
 def create_token():
     data = request.get_json()
     
-    # 1. Input Validation & Data Sanitization (STRICTLY MATCHING THE PROVIDED PAYLOAD)
     is_cc = 'creditCardInformation' in data
-    is_ach = 'bankAccountInformation' in data # Assuming this may also be present
+    is_ach = 'bankAccountInformation' in data
 
-    # Flask-side validation to ensure required top-level fields are present
     if not all(k in data for k in ('payer', 'emailAddress')):
         return api_error("Missing required customer fields: 'payer' or 'emailAddress'.", 400)
 
     external_data = data.copy()
 
-    # Clean up the payload based on payment type (if both are sent, default to CC)
     if is_cc and is_ach:
         del external_data['bankAccountInformation'] 
     elif is_ach:
@@ -179,19 +195,22 @@ def create_token():
     else:
         return api_error("Missing 'creditCardInformation' or 'bankAccountInformation' in request body.", 400)
 
-    # 2. Prepare Headers and Auth for External Call
+    # 1. Setup Session with TLS adapter
+    session = requests.Session()
+    session.mount('https://', TlsAdapter()) # Apply the fix
+
     auth = HTTPBasicAuth(EPAY_API_KEY, EPAY_API_SECRET)
     headers = {
         'Content-Type': 'application/json',
         'Connection': 'close' 
     }
 
-    # 3. EXECUTE REAL EXTERNAL API CALL
+    # 2. EXECUTE REAL EXTERNAL API CALL using the session
     try:
-        real_response = requests.post(
+        real_response = session.post( # Use session.post instead of requests.post
             f"{EPAY_BASE_URL}/tokens", 
             headers=headers, 
-            json=external_data, # Use the validated/cleaned data here
+            json=external_data, 
             auth=auth,
             timeout=30,
             verify=False 
@@ -206,7 +225,6 @@ def create_token():
 
         tokens[token_id] = data
         
-        # 4. Prepare Flask Response (201 Created)
         flask_response = jsonify({'tokenId': token_id, 'message': 'Token created successfully.'})
         flask_response.status_code = 201
         
@@ -218,7 +236,6 @@ def create_token():
     except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code
         try:
-            # The actual error from the external API (ePay) will show up here
             error_message = e.response.json().get('error') or e.response.json().get('message') or e.response.text
         except:
             error_message = e.response.text
@@ -226,8 +243,8 @@ def create_token():
         return api_error(f"External Token API Error ({status_code}): {error_message}", status_code)
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
-            f"Network Error (503): Connection failed. Check if API Key/Secret is correct, "
-            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}. (Check IP Whitelisting)"
+            f"Network Error (503): Connection failed. This is likely an SSL/TLS compatibility issue on the cloud host. "
+            f"The TLS adapter has been applied to attempt a fix."
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
@@ -245,7 +262,6 @@ def get_fees():
     except (TypeError, ValueError):
         return api_error("Invalid amount parameter.", 400)
 
-    # --- MOCK FEE CALCULATION FOR DEMO ---
     cc_fee = round(amount * 0.03 + 0.30, 2)
     ach_fee = round(amount * 0.005 + 0.05, 2)
     
@@ -256,7 +272,7 @@ def get_fees():
     })
 
 
-# --- 3. POST /epay/transactions (REAL PAYMENT PROCESSING) ---
+# --- 3. POST /epay/transactions (REAL PAYMENT PROCESSING - WITH TLS FIX) ---
 @app.route('/api/epay/transactions', methods=['POST'])
 def post_transaction():
     data = request.get_json()
@@ -264,9 +280,12 @@ def post_transaction():
     if not all(k in data for k in ('amount', 'tokenId')):
         return api_error("Missing required fields: amount or tokenId.", 400)
         
-    invoice_id = data.pop('invoiceId', None) # Remove local field before sending to ePay
+    invoice_id = data.pop('invoiceId', None)
 
-    # 1. Prepare Auth for External Call
+    # 1. Setup Session with TLS adapter
+    session = requests.Session()
+    session.mount('https://', TlsAdapter()) # Apply the fix
+
     auth = HTTPBasicAuth(EPAY_API_KEY, EPAY_API_SECRET)
     headers = {
         'Content-Type': 'application/json',
@@ -275,10 +294,10 @@ def post_transaction():
 
     # 2. EXECUTE REAL EXTERNAL API CALL
     try:
-        real_response = requests.post(
+        real_response = session.post( # Use session.post instead of requests.post
             f"{EPAY_BASE_URL}/transactions", 
             headers=headers, 
-            json=data, # Use data without invoiceId
+            json=data, 
             auth=auth,
             timeout=30,
             verify=False
@@ -301,12 +320,10 @@ def post_transaction():
         }
         transactions[txn_id] = new_transaction
         
-        # 3. LOCAL UPDATE: Mark invoice as paid if transaction succeeded and invoiceId was provided
         if invoice_id and invoice_id in invoices:
              invoices[invoice_id]['status'] = 'Paid'
              invoices[invoice_id]['transactionId'] = txn_id
         
-        # 4. Prepare Flask Response (201 Created)
         flask_response = jsonify({'id': txn_id, 'publicId': public_id, 'invoiceStatusUpdated': (invoice_id is not None)})
         flask_response.status_code = 201
         
@@ -325,32 +342,34 @@ def post_transaction():
         return api_error(f"External Transaction API Error ({status_code}): {error_message}", status_code)
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
-            f"Network Error (503): Connection failed. Check if API Key/Secret is correct, "
-            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}. (Check IP Whitelisting)"
+            f"Network Error (503): Connection failed. This is likely an SSL/TLS compatibility issue on the cloud host. "
+            f"The TLS adapter has been applied to attempt a fix."
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
         return api_error(f"Server-side error during transaction post: {str(e)}", 500)
 
 
-# --- 4. GET /epay/transactions/<txn_id> (REAL STATUS CHECK) ---
+# --- 4. GET /epay/transactions/<txn_id> (REAL STATUS CHECK - WITH TLS FIX) ---
 @app.route('/api/epay/transactions/<transaction_id>', methods=['GET'])
 def get_transaction(transaction_id):
     
-    # 1. Check local cache first
     if transaction_id in transactions:
         return jsonify(transactions[transaction_id])
     
-    # 2. Prepare Auth for External Call
+    # 1. Setup Session with TLS adapter
+    session = requests.Session()
+    session.mount('https://', TlsAdapter()) # Apply the fix
+
     auth = HTTPBasicAuth(EPAY_API_KEY, EPAY_API_SECRET)
     headers = {
         'Content-Type': 'application/json',
         'Connection': 'close'
     }
 
-    # 3. EXECUTE REAL EXTERNAL API CALL
+    # 2. EXECUTE REAL EXTERNAL API CALL
     try:
-        real_response = requests.get(
+        real_response = session.get( # Use session.get instead of requests.get
             f"{EPAY_BASE_URL}/transactions/{transaction_id}", 
             headers=headers, 
             auth=auth,
@@ -361,7 +380,6 @@ def get_transaction(transaction_id):
         
         transaction_details = real_response.json()
         
-        # Update local cache with fetched data
         transactions[transaction_id] = transaction_details
 
         return jsonify(transaction_details)
@@ -376,8 +394,8 @@ def get_transaction(transaction_id):
         return api_error(f"External Status Check API Error ({status_code}): {error_message}", status_code)
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
-            f"Network Error (503): Connection failed. Check if API Key/Secret is correct, "
-            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}. (Check IP Whitelisting)"
+            f"Network Error (503): Connection failed. This is likely an SSL/TLS compatibility issue on the cloud host. "
+            f"The TLS adapter has been applied to attempt a fix."
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
