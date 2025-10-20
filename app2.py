@@ -3,6 +3,7 @@ import random
 import uuid
 from flask import Flask, request, jsonify, url_for, Response
 from flask_cors import CORS
+# NOTE: The 'requests' library is used to simulate calling the external ePay API.
 import requests 
 from requests.auth import HTTPBasicAuth
 import urllib3
@@ -15,13 +16,12 @@ app = Flask(__name__)
 # Enable CORS for communication with the frontend
 CORS(app)
 
-# --- CONFIGURATION (UPDATE THESE FOR REAL API ACCESS) ---
+# --- CONFIGURATION (UPDATED WITH REGENERATED CREDENTIALS) ---
 
 EPAY_API_KEY = "376f59d731aa4ea"  
 EPAY_API_SECRET = "4f4eaf61f7754dd" 
 
 EPAY_BASE_URL = "https://api.epaypolicydemo.com:443/api/v1"
-
 
 # --- IN-MEMORY MOCK DATABASE ---
 customers = {}
@@ -91,11 +91,8 @@ def save_customer_token(customer_id):
     data = request.get_json()
     token_id = data.get('tokenId')
     
-    # Optional: Check if the token was successfully created and stored locally
     if not token_id:
         return api_error("Missing 'tokenId' in request body.", 400)
-    
-    # NOTE: In a real scenario, you'd verify the token with the external API if it wasn't created locally.
     
     # Store the tokenId on the customer record
     customers[customer_id]['tokenId'] = token_id
@@ -157,7 +154,7 @@ def mark_invoice_paid(invoice_id):
 # === EPAY API ENDPOINTS (REAL CALL IMPLEMENTATION) =======
 # =========================================================
 
-# --- 1. POST /epay/tokens (REAL TOKEN CREATION) ---
+# --- 1. POST /epay/tokens (REAL TOKEN CREATION - FLATTENED PAYLOAD) ---
 @app.route('/api/epay/tokens', methods=['POST'])
 def create_token():
     data = request.get_json()
@@ -166,8 +163,13 @@ def create_token():
     is_cc = 'creditCardInformation' in data
     is_ach = 'bankAccountInformation' in data
     
+    # Check for required customer-related fields expected by the external API
+    if not all(k in data for k in ('emailAddress', 'payerName')):
+        return api_error("Missing required customer fields: 'emailAddress' or 'payerName'.", 400)
+
     external_data = data.copy()
 
+    # Clean up the payload based on payment type
     if is_cc and is_ach:
         del external_data['bankAccountInformation'] 
     elif is_ach:
@@ -191,10 +193,10 @@ def create_token():
         real_response = requests.post(
             f"{EPAY_BASE_URL}/tokens", 
             headers=headers, 
-            json=external_data,
+            json=external_data, # Use the flattened data here
             auth=auth,
             timeout=30,
-            verify=False # TEMPORARILY DISABLE SSL VERIFICATION
+            verify=False 
         )
         real_response.raise_for_status()
         
@@ -204,7 +206,7 @@ def create_token():
         if not token_id:
             return api_error("Token API succeeded but did not return a Token ID.", 500)
 
-        tokens[token_id] = data # Store token locally
+        tokens[token_id] = data
         
         # 4. Prepare Flask Response (201 Created)
         flask_response = jsonify({'tokenId': token_id, 'message': 'Token created successfully.'})
@@ -226,7 +228,7 @@ def create_token():
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
             f"Network Error (503): Connection failed. Check if API Key/Secret is correct, "
-            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}."
+            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}. (Check IP Whitelisting)"
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
@@ -260,20 +262,19 @@ def get_fees():
 def post_transaction():
     data = request.get_json()
     
-    # 1. Input Validation. Added optional invoiceId for local tracking.
     if not all(k in data for k in ('amount', 'tokenId')):
         return api_error("Missing required fields: amount or tokenId.", 400)
         
-    invoice_id = data.pop('invoiceId', None) # Remove it from the payload sent to ePay
+    invoice_id = data.pop('invoiceId', None) # Remove local field before sending to ePay
 
-    # 2. Prepare Auth for External Call
+    # 1. Prepare Auth for External Call
     auth = HTTPBasicAuth(EPAY_API_KEY, EPAY_API_SECRET)
     headers = {
         'Content-Type': 'application/json',
         'Connection': 'close'
     }
 
-    # 3. EXECUTE REAL EXTERNAL API CALL
+    # 2. EXECUTE REAL EXTERNAL API CALL
     try:
         real_response = requests.post(
             f"{EPAY_BASE_URL}/transactions", 
@@ -285,7 +286,6 @@ def post_transaction():
         )
         real_response.raise_for_status()
         
-        # Assume the real API returns the Transaction ID and Public ID in the body
         response_data = real_response.json()
         txn_id = response_data.get('transactionId') or response_data.get('id')
         public_id = response_data.get('publicId')
@@ -298,16 +298,16 @@ def post_transaction():
             'publicId': public_id,
             'status': response_data.get('status', 'Completed'),
             'details': data,
-            'local_invoice_id': invoice_id # Store the local invoice ID on the transaction
+            'local_invoice_id': invoice_id
         }
         transactions[txn_id] = new_transaction
         
-        # 4. LOCAL UPDATE: Mark invoice as paid if transaction succeeded and invoiceId was provided
+        # 3. LOCAL UPDATE: Mark invoice as paid if transaction succeeded and invoiceId was provided
         if invoice_id and invoice_id in invoices:
              invoices[invoice_id]['status'] = 'Paid'
              invoices[invoice_id]['transactionId'] = txn_id
         
-        # 5. Prepare Flask Response (201 Created)
+        # 4. Prepare Flask Response (201 Created)
         flask_response = jsonify({'id': txn_id, 'publicId': public_id, 'invoiceStatusUpdated': (invoice_id is not None)})
         flask_response.status_code = 201
         
@@ -327,7 +327,7 @@ def post_transaction():
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
             f"Network Error (503): Connection failed. Check if API Key/Secret is correct, "
-            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}."
+            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}. (Check IP Whitelisting)"
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
@@ -378,7 +378,7 @@ def get_transaction(transaction_id):
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
             f"Network Error (503): Connection failed. Check if API Key/Secret is correct, "
-            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}."
+            f"or if your firewall blocks port 443 access to {EPAY_BASE_URL}. (Check IP Whitelisting)"
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
@@ -386,5 +386,6 @@ def get_transaction(transaction_id):
 
 
 # --- RUNNER ---
-#-- if __name__ == '__main__':
-# --    app.run(debug=True)
+if __name__ == '__main__':
+    # NOTE: In production (like on Render), this block is ignored; Gunicorn runs the app.
+    app.run(debug=True)
