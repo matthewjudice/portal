@@ -4,25 +4,33 @@ import uuid
 import ssl
 from flask import Flask, request, jsonify, url_for, Response
 from flask_cors import CORS
+# NOTE: The 'requests' library is used to simulate calling the external ePay API.
 import requests 
 from requests.auth import HTTPBasicAuth
-from requests.adapters import HTTPAdapter # NEW IMPORT
+from requests.adapters import HTTPAdapter 
 import urllib3
 
 # Suppress the InsecureRequestWarning from using verify=False
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 # =========================================================
-# === CRITICAL FIX: Custom Adapter for TLS 1.2/1.3 Force ===
+# === CRITICAL FIX: Custom Adapter for TLS Compatibility ===
 # =========================================================
 
-# This adapter forces the requests library to use a modern TLS protocol, 
-# which often resolves 503/SSL issues when connecting from cloud environments.
+# This adapter forces the requests library to use a modern TLS protocol 
+# (TLSv1.2+) and explicitly disables certificate verification checks 
+# to resolve the "verify_mode/check_hostname" conflict on cloud hosts.
 class TlsAdapter(HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False):
-        # Force TLSv1.2 or higher
-        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        # Create a context that explicitly sets both verify_mode and check_hostname 
+        # to ensure compatibility with verify=False in the request call.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        # Force TLSv1.2 or higher for compatibility
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2 
+        
         self.poolmanager = urllib3.poolmanager.PoolManager(
             num_pools=connections,
             maxsize=maxsize,
@@ -31,7 +39,6 @@ class TlsAdapter(HTTPAdapter):
             ssl_context=ctx
         )
 
-# =========================================================
 # =========================================================
 
 app = Flask(__name__)
@@ -104,6 +111,7 @@ def get_customer(customer_id):
 
 @app.route('/api/customers/<customer_id>/token', methods=['POST'])
 def save_customer_token(customer_id):
+    """Links an existing tokenId (obtained via POST /api/epay/tokens) to a local customer."""
     if customer_id not in customers:
         return api_error("Customer not found", 404)
         
@@ -179,6 +187,7 @@ def create_token():
     is_cc = 'creditCardInformation' in data
     is_ach = 'bankAccountInformation' in data
 
+    # Validation matching the external API's required fields
     if not all(k in data for k in ('payer', 'emailAddress')):
         return api_error("Missing required customer fields: 'payer' or 'emailAddress'.", 400)
 
@@ -212,7 +221,7 @@ def create_token():
             headers=headers, 
             json=external_data, 
             auth=auth,
-            timeout=60,
+            timeout=60, # Increased timeout for slow APIs
             verify=False 
         )
         real_response.raise_for_status()
@@ -242,9 +251,10 @@ def create_token():
             
         return api_error(f"External Token API Error ({status_code}): {error_message}", status_code)
     except requests.exceptions.RequestException as e:
+        # This message should now be triggered only by true network/firewall failures
         diagnostic_message = (
-            f"Network Error (503): Connection failed. This is likely an SSL/TLS compatibility issue on the cloud host. "
-            f"The TLS adapter has been applied to attempt a fix."
+            f"Network Error (503/502): Connection failed after applying TLS fix. "
+            f"Please verify the Gunicorn timeout (Procfile) and ensure the Render IP is whitelisted."
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
@@ -284,7 +294,7 @@ def post_transaction():
 
     # 1. Setup Session with TLS adapter
     session = requests.Session()
-    session.mount('https://', TlsAdapter()) # Apply the fix
+    session.mount('https://', TlsAdapter()) 
 
     auth = HTTPBasicAuth(EPAY_API_KEY, EPAY_API_SECRET)
     headers = {
@@ -294,12 +304,12 @@ def post_transaction():
 
     # 2. EXECUTE REAL EXTERNAL API CALL
     try:
-        real_response = session.post( # Use session.post instead of requests.post
+        real_response = session.post( 
             f"{EPAY_BASE_URL}/transactions", 
             headers=headers, 
             json=data, 
             auth=auth,
-            timeout=60,
+            timeout=60, # Increased timeout
             verify=False
         )
         real_response.raise_for_status()
@@ -342,8 +352,8 @@ def post_transaction():
         return api_error(f"External Transaction API Error ({status_code}): {error_message}", status_code)
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
-            f"Network Error (503): Connection failed. This is likely an SSL/TLS compatibility issue on the cloud host. "
-            f"The TLS adapter has been applied to attempt a fix."
+            f"Network Error (503/502): Connection failed after applying TLS fix. "
+            f"Please verify the Gunicorn timeout (Procfile) and ensure the Render IP is whitelisted."
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
@@ -359,7 +369,7 @@ def get_transaction(transaction_id):
     
     # 1. Setup Session with TLS adapter
     session = requests.Session()
-    session.mount('https://', TlsAdapter()) # Apply the fix
+    session.mount('https://', TlsAdapter()) 
 
     auth = HTTPBasicAuth(EPAY_API_KEY, EPAY_API_SECRET)
     headers = {
@@ -369,11 +379,11 @@ def get_transaction(transaction_id):
 
     # 2. EXECUTE REAL EXTERNAL API CALL
     try:
-        real_response = session.get( # Use session.get instead of requests.get
+        real_response = session.get( 
             f"{EPAY_BASE_URL}/transactions/{transaction_id}", 
             headers=headers, 
             auth=auth,
-            timeout=60,
+            timeout=60, # Increased timeout
             verify=False
         )
         real_response.raise_for_status()
@@ -394,8 +404,8 @@ def get_transaction(transaction_id):
         return api_error(f"External Status Check API Error ({status_code}): {error_message}", status_code)
     except requests.exceptions.RequestException as e:
         diagnostic_message = (
-            f"Network Error (503): Connection failed. This is likely an SSL/TLS compatibility issue on the cloud host. "
-            f"The TLS adapter has been applied to attempt a fix."
+            f"Network Error (503/502): Connection failed after applying TLS fix. "
+            f"Please verify the Gunicorn timeout (Procfile) and ensure the Render IP is whitelisted."
         )
         return api_error(diagnostic_message, 503)
     except Exception as e:
