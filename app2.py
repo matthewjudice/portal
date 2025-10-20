@@ -212,7 +212,7 @@ def create_token():
             headers=headers, 
             json=external_data, 
             auth=auth,
-            timeout=30,
+            timeout=60,
             verify=False 
         )
         real_response.raise_for_status()
@@ -299,7 +299,7 @@ def post_transaction():
             headers=headers, 
             json=data, 
             auth=auth,
-            timeout=30,
+            timeout=60,
             verify=False
         )
         real_response.raise_for_status()
@@ -373,7 +373,7 @@ def get_transaction(transaction_id):
             f"{EPAY_BASE_URL}/transactions/{transaction_id}", 
             headers=headers, 
             auth=auth,
-            timeout=30,
+            timeout=60,
             verify=False
         )
         real_response.raise_for_status()
