@@ -22,6 +22,7 @@ google-resumable-media==2.7.2
 googleapis-common-protos==1.70.0
 grpcio==1.75.1
 grpcio-status==1.75.1
+gunicorn==23.0.0
 h11==0.16.0
 h2==4.3.0
 hpack==4.1.0
@@ -38,6 +39,7 @@ keyring==25.6.0
 MarkupSafe==3.0.3
 more-itertools==10.7.0
 msgpack==1.1.2
+packaging==25.0
 pillow==11.3.0
 proto-plus==1.26.1
 protobuf==6.33.0
